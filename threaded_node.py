@@ -13,7 +13,7 @@ import os
 import shutil
 import random
 from typing import Dict, Any
-from storage_virtual_node import StorageVirtualNode, TransferStatus
+from storage_virtual_node import StorageVirtualNode, TransferStatus, FileTransfer, FileChunk
 
 
 class ThreadedNodeServer:
@@ -30,6 +30,7 @@ class ThreadedNodeServer:
         self.network_host = None
         self.network_port = None
         self.registered = False
+        self.simulated_offline = False  # New flag for simulated offline status
         
         # Set up storage directory
         if storage_path is None:
@@ -113,6 +114,10 @@ class ThreadedNodeServer:
         """Process commands from clients"""
         with self.lock:
             try:
+                # Check if node is simulated offline (except for health checks and status changes)
+                if self.simulated_offline and command not in ['health', 'set_online_status']:
+                    return {"error": f"Node {self.node.node_id} is currently offline"}
+                
                 if command == "health":
                     return {"status": "healthy", "node_id": self.node.node_id}
                 
@@ -238,6 +243,14 @@ class ThreadedNodeServer:
                 elif command == "list_files":
                     # New command: List files stored on this node
                     return self._list_local_files()
+                
+                elif command == "set_online_status":
+                    # Special command to change online/offline status
+                    online = args.get('online', True)
+                    self.simulated_offline = not online
+                    status = "online" if online else "offline"
+                    print(f"[Node {self.node.node_id}] Simulated status changed to: {status}")
+                    return {"success": True, "node_id": self.node.node_id, "status": status}
                 
                 else:
                     return {"error": f"Unknown command: {command}"}
@@ -443,10 +456,11 @@ def interactive_mode(server: ThreadedNodeServer):
         print("  3. Show storage statistics")
         print("  4. Show network statistics")
         print("  5. Show performance metrics")
-        print("  6. Exit interactive mode")
+        print("  6. Set online/offline status")
+        print("  7. Exit interactive mode")
         
         try:
-            choice = input("\nEnter your choice (1-6): ").strip()
+            choice = input("\nEnter your choice (1-7): ").strip()
             
             if choice == '1':
                 # Create file
@@ -554,11 +568,35 @@ def interactive_mode(server: ThreadedNodeServer):
                     print(f"✗ Failed to get performance stats: {result['error']}")
             
             elif choice == '6':
+                # Set online/offline status
+                current_status = "online" if not server.simulated_offline else "offline"
+                print(f"\nCurrent status: {current_status.upper()}")
+                print("1. Set ONLINE")
+                print("2. Set OFFLINE (simulated)")
+                
+                status_choice = input("Select status (1-2): ").strip()
+                if status_choice == '1':
+                    result = server._process_command("set_online_status", {"online": True})
+                    if result.get('success'):
+                        print("✓ Node set to ONLINE")
+                    else:
+                        print(f"✗ Failed to set node online: {result.get('error')}")
+                elif status_choice == '2':
+                    result = server._process_command("set_online_status", {"online": False})
+                    if result.get('success'):
+                        print("✓ Node set to OFFLINE (simulated)")
+                        print("  Node will reject requests but remain registered with network")
+                    else:
+                        print(f"✗ Failed to set node offline: {result.get('error')}")
+                else:
+                    print("Invalid choice!")
+            
+            elif choice == '7':
                 print("Exiting interactive mode...")
                 break
             
             else:
-                print("Invalid choice! Please enter 1-6.")
+                print("Invalid choice! Please enter 1-7.")
                 
         except KeyboardInterrupt:
             print("\nExiting interactive mode...")

@@ -78,6 +78,19 @@ class NetworkClient:
     def tick(self):
         """Reset network utilization"""
         return self._send_request("tick")
+    
+    def set_node_status(self, node_id: str, status: str):
+        """Set node status (online/offline)"""
+        return self._send_request("set_node_status", {
+            "node_id": node_id,
+            "status": status
+        })
+    
+    def get_node_status(self, node_id: str):
+        """Get node status"""
+        return self._send_request("get_node_status", {
+            "node_id": node_id
+        })
 
 
 class NodeClient:
@@ -131,6 +144,12 @@ class NodeClient:
             'file_name': file_name,
             'file_size_mb': file_size_mb,
             'content_type': content_type
+        })
+    
+    def set_online_status(self, online: bool):
+        """Set node online/offline status"""
+        return self._send_request("set_online_status", {
+            'online': online
         })
 
 
@@ -210,10 +229,11 @@ def interactive_mode(network_client, network_host, network_port):
         print("  2. Transfer file between nodes")
         print("  3. Create file on a node")
         print("  4. Show network statistics")
-        print("  5. Exit")
+        print("  5. Manage node online/offline status")
+        print("  6. Exit")
         
         try:
-            choice = input("\nEnter your choice (1-5): ").strip()
+            choice = input("\nEnter your choice (1-6): ").strip()
             
             if choice == '1':
                 list_nodes_and_files(network_client, network_host, network_port)
@@ -228,11 +248,14 @@ def interactive_mode(network_client, network_host, network_port):
                 show_network_stats(network_client)
             
             elif choice == '5':
+                manage_node_status(network_client, network_host, network_port)
+            
+            elif choice == '6':
                 print("Exiting interactive mode...")
                 break
             
             else:
-                print("Invalid choice! Please enter 1-5.")
+                print("Invalid choice! Please enter 1-6.")
                 
         except KeyboardInterrupt:
             print("\nExiting interactive mode...")
@@ -282,27 +305,40 @@ def list_nodes_and_files(network_client, network_host, network_port):
             node_clients[node_id] = NodeClient(host, int(port))
     
     # Display nodes and their files
-    for node_id, client in node_clients.items():
-        print(f"\n● {node_id.upper()} [{nodes_info[node_id]['status'].upper()}]:")
-        print(f"  Address: {nodes_info[node_id]['address']}")
+    for node_id, info in nodes_info.items():
+        status_symbol = "●" if info['status'] == 'online' else "○"
+        simulated_status = ""
         
-        # Get node info
-        node_info = client.info()
-        if 'error' not in node_info:
-            print(f"  Storage: {node_info.get('total_storage', 0) / (1024**3):.0f} GB")
+        if node_id in node_clients:
+            simulated_offline = _check_simulated_offline(node_clients[node_id])
+            if simulated_offline:
+                simulated_status = " [SIMULATED OFFLINE]"
+                status_symbol = "○"
         
-        # Get files list
-        files_result = client.list_files()
-        if files_result.get('success'):
-            files = files_result.get('files', [])
-            if files:
-                print(f"  Files ({len(files)}):")
-                for file_info in files:
-                    print(f"    - {file_info['name']} ({file_info['size_mb']:.2f} MB)")
+        print(f"\n{status_symbol} {node_id.upper()} [{info['status'].upper()}]{simulated_status}:")
+        print(f"  Address: {info['address']}")
+        
+        # Only try to get files if node is not simulated offline
+        if node_id in node_clients and not _check_simulated_offline(node_clients[node_id]):
+            # Get node info
+            node_info = node_clients[node_id].info()
+            if 'error' not in node_info:
+                print(f"  Storage: {node_info.get('total_storage', 0) / (1024**3):.0f} GB")
+            
+            # Get files list
+            files_result = node_clients[node_id].list_files()
+            if files_result.get('success'):
+                files = files_result.get('files', [])
+                if files:
+                    print(f"  Files ({len(files)}):")
+                    for file_info in files:
+                        print(f"    - {file_info['name']} ({file_info['size_mb']:.2f} MB)")
+                else:
+                    print("  Files: No files stored")
             else:
-                print("  Files: No files stored")
+                print("  Files: Unable to retrieve file list")
         else:
-            print("  Files: Unable to retrieve file list")
+            print("  Files: Node is offline")
     
     print(f"\nTotal nodes: {len(registered_nodes)}")
     online_count = sum(1 for info in nodes_info.values() if info['status'] == 'online')
@@ -322,16 +358,31 @@ def transfer_file_interactive(network_client, network_host, network_port):
         return
     
     registered_nodes = nodes_list.get('nodes', {})
-    online_nodes = {node_id: info for node_id, info in registered_nodes.items() 
-                   if isinstance(info, dict) and info.get('status') == 'online'}
     
-    if len(online_nodes) < 2:
-        print("Need at least 2 online nodes for file transfer")
+    # Create node clients and check simulated offline status
+    node_clients = {}
+    reachable_nodes = {}
+    
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict) and node_data.get('status') == 'online' and ':' in node_data.get('address', ''):
+            address = node_data['address']
+            host, port = address.split(':')
+            client = NodeClient(host, int(port))
+            node_clients[node_id] = client
+            
+            # Check if node is actually reachable and not simulated offline
+            if not _check_simulated_offline(client):
+                reachable_nodes[node_id] = node_data
+    
+    if len(reachable_nodes) < 2:
+        print("Need at least 2 reachable nodes for file transfer")
+        if len(reachable_nodes) == 1:
+            print("Only one node is reachable:", list(reachable_nodes.keys())[0])
         return
     
     # Select source node
     print("\nAvailable source nodes:")
-    node_list = list(online_nodes.keys())
+    node_list = list(reachable_nodes.keys())
     for i, node_id in enumerate(node_list, 1):
         print(f"  {i}. {node_id}")
     
@@ -343,7 +394,7 @@ def transfer_file_interactive(network_client, network_host, network_port):
         return
     
     # Get files from source node
-    source_info = online_nodes[source_node_id]
+    source_info = reachable_nodes[source_node_id]
     if ':' not in source_info['address']:
         print("Invalid node address")
         return
@@ -432,16 +483,29 @@ def create_file_interactive(network_client, network_host, network_port):
         return
     
     registered_nodes = nodes_list.get('nodes', {})
-    online_nodes = {node_id: info for node_id, info in registered_nodes.items() 
-                   if isinstance(info, dict) and info.get('status') == 'online'}
     
-    if not online_nodes:
-        print("No online nodes available")
+    # Create node clients and check simulated offline status
+    node_clients = {}
+    reachable_nodes = {}
+    
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict) and node_data.get('status') == 'online' and ':' in node_data.get('address', ''):
+            address = node_data['address']
+            host, port = address.split(':')
+            client = NodeClient(host, int(port))
+            node_clients[node_id] = client
+            
+            # Check if node is actually reachable and not simulated offline
+            if not _check_simulated_offline(client):
+                reachable_nodes[node_id] = node_data
+    
+    if not reachable_nodes:
+        print("No reachable nodes available")
         return
     
     # Select node
     print("\nAvailable nodes:")
-    node_list = list(online_nodes.keys())
+    node_list = list(reachable_nodes.keys())
     for i, node_id in enumerate(node_list, 1):
         print(f"  {i}. {node_id}")
     
@@ -453,7 +517,7 @@ def create_file_interactive(network_client, network_host, network_port):
         return
     
     # Get node client
-    node_info = online_nodes[selected_node_id]
+    node_info = reachable_nodes[selected_node_id]
     if ':' not in node_info['address']:
         print("Invalid node address")
         return
@@ -523,6 +587,170 @@ def show_network_stats(network_client):
         
     except Exception as e:
         print(f"Could not retrieve network stats: {e}")
+
+
+def manage_node_status(network_client, network_host, network_port):
+    """Manage node online/offline status"""
+    print(f"\n{'='*70}")
+    print("MANAGE NODE ONLINE/OFFLINE STATUS")
+    print(f"{'='*70}")
+    
+    # Get available nodes
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to get nodes: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    
+    if not registered_nodes:
+        print("No nodes registered with the network")
+        return
+    
+    # Display nodes and their current status
+    print("\nCurrent Node Status:")
+    print("-" * 50)
+    
+    nodes_info = {}
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict):
+            nodes_info[node_id] = {
+                'address': node_data.get('address', ''),
+                'status': node_data.get('status', 'unknown')
+            }
+        else:
+            nodes_info[node_id] = {
+                'address': node_data,
+                'status': 'online'
+            }
+    
+    # Create node clients for nodes that are reachable
+    node_clients = {}
+    for node_id, info in nodes_info.items():
+        if info['status'] == 'online' and ':' in info['address']:
+            host, port = info['address'].split(':')
+            node_clients[node_id] = NodeClient(host, int(port))
+    
+    # Display nodes
+    for i, (node_id, info) in enumerate(nodes_info.items(), 1):
+        status_symbol = "●" if info['status'] == 'online' else "○"
+        simulated_status = " (simulated offline)" if node_id in node_clients and _check_simulated_offline(node_clients[node_id]) else ""
+        print(f"  {i}. {status_symbol} {node_id} - {info['status'].upper()}{simulated_status}")
+    
+    # Select node to manage
+    try:
+        node_choice = int(input(f"\nSelect node to manage (1-{len(nodes_info)}): ")) - 1
+        selected_node_id = list(nodes_info.keys())[node_choice]
+        selected_node_info = nodes_info[selected_node_id]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get current status details
+    current_network_status = selected_node_info['status']
+    current_simulated_status = "unknown"
+    
+    if selected_node_id in node_clients:
+        simulated_offline = _check_simulated_offline(node_clients[selected_node_id])
+        current_simulated_status = "offline" if simulated_offline else "online"
+    
+    print(f"\nNode: {selected_node_id}")
+    print(f"Network Status: {current_network_status.upper()}")
+    if selected_node_id in node_clients:
+        print(f"Simulated Status: {current_simulated_status.upper()}")
+    print(f"Address: {selected_node_info['address']}")
+    
+    # Show management options - MERGED OPTIONS
+    print(f"\nManagement Options for {selected_node_id}:")
+    print("  1. Set node ONLINE")
+    print("  2. Set node OFFLINE")
+    print("  3. Test node connectivity")
+    
+    try:
+        action_choice = input("\nSelect action (1-3): ").strip()
+        
+        if action_choice == '1':
+            # Set node online - BOTH network and node
+            print(f"\nSetting {selected_node_id} to ONLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "online")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator updated: {selected_node_id} -> ONLINE")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                node_result = node_clients[selected_node_id].set_online_status(True)
+                if node_result.get('success'):
+                    print(f"✓ Node {selected_node_id} set to ONLINE")
+                else:
+                    print(f"✗ Failed to set node status: {node_result.get('error')}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+        
+        elif action_choice == '2':
+            # Set node offline - BOTH network and node
+            print(f"\nSetting {selected_node_id} to OFFLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "offline")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator updated: {selected_node_id} -> OFFLINE")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                node_result = node_clients[selected_node_id].set_online_status(False)
+                if node_result.get('success'):
+                    print(f"✓ Node {selected_node_id} set to OFFLINE")
+                else:
+                    print(f"✗ Failed to set node status: {node_result.get('error')}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+        
+        elif action_choice == '3':
+            # Test connectivity
+            print(f"\nTesting connectivity to {selected_node_id}...")
+            if selected_node_id in node_clients:
+                # Test basic health
+                health_result = node_clients[selected_node_id]._send_request("health", {})
+                if 'error' in health_result:
+                    print(f"✗ Node is unreachable: {health_result['error']}")
+                else:
+                    print(f"✓ Node is reachable and healthy")
+                    
+                # Test simulated status
+                simulated_offline = _check_simulated_offline(node_clients[selected_node_id])
+                status = "OFFLINE" if simulated_offline else "ONLINE"
+                print(f"  Simulated status: {status}")
+                
+                # Test other commands
+                info_result = node_clients[selected_node_id].info()
+                if 'error' in info_result:
+                    print(f"  Info command: Failed ({info_result['error']})")
+                else:
+                    print(f"  Info command: Success")
+            else:
+                print(f"✗ Node is not reachable at {selected_node_info['address']}")
+        
+        else:
+            print("Invalid action!")
+            
+    except Exception as e:
+        print(f"Error during management: {e}")
+def _check_simulated_offline(node_client):
+    """Check if a node is in simulated offline mode"""
+    try:
+        # Try to get info - if it fails with offline message, node is simulated offline
+        result = node_client.info()
+        if 'error' in result and 'offline' in result['error'].lower():
+            return True
+        return False
+    except:
+        return False
 
 
 def main():
