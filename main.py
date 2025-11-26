@@ -2,7 +2,7 @@
 """
 Threaded Storage Virtual Network - Main Client
 Connects to network coordinator and discovers nodes automatically
-Supports real file transfers
+Supports real file transfers with interactive mode
 """
 
 import socket
@@ -120,6 +120,409 @@ class NodeClient:
     def performance_stats(self):
         """Get performance metrics"""
         return self._send_request("performance_stats")
+    
+    def list_files(self):
+        """List files stored on this node"""
+        return self._send_request("list_files")
+    
+    def create_file(self, file_name: str, file_size_mb: int, content_type: str = 'random'):
+        """Create a file on this node"""
+        return self._send_request("create_file", {
+            'file_name': file_name,
+            'file_size_mb': file_size_mb,
+            'content_type': content_type
+        })
+
+
+def transfer_file(network_client, source_node_id, target_node_id, file_name, file_size_bytes, chunks_per_step=3):
+    """Transfer a file between nodes with progress display"""
+    print(f"\nInitiating transfer: {file_name} ({file_size_bytes / (1024*1024):.2f}MB)")
+    print(f"Source: {source_node_id} → Target: {target_node_id}")
+    
+    transfer_result = network_client.initiate_transfer(
+        source_node_id=source_node_id,
+        target_node_id=target_node_id,
+        file_name=file_name,
+        file_size=file_size_bytes
+    )
+    
+    if not transfer_result.get('success'):
+        print(f"✗ Failed to initiate transfer: {transfer_result}")
+        return False
+    
+    file_id = transfer_result['file_id']
+    total_chunks = transfer_result['total_chunks']
+    print(f"✓ Transfer initiated (ID: {file_id[:8]}...)")
+    print(f"✓ Total chunks: {total_chunks}")
+    
+    # Process transfer with progress bar
+    print(f"\nProcessing transfer with {chunks_per_step} chunks per step...")
+    print("-" * 70)
+    
+    with tqdm(total=total_chunks, desc="Transferring", unit="chunk",
+              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+              ncols=70) as pbar:
+        completed = False
+        total_start_time = time.time()
+        
+        while not completed:
+            # Tick the network
+            network_client.tick()
+            
+            # Process chunks
+            try:
+                result = network_client.process_transfer(file_id, chunks_per_step)
+                
+                if result.get('success'):
+                    chunks_processed = result['chunks_processed']
+                    pbar.update(chunks_processed)
+                    completed = result.get('completed', False)
+                    
+                    if completed:
+                        total_time = time.time() - total_start_time
+                        print(f"\n✓ Transfer completed successfully!")
+                        print(f"  Total time: {total_time:.2f} seconds")
+                        print(f"  Average speed: {(file_size_bytes / (1024*1024) / total_time):.2f} MB/s")
+                        print(f"  File stored on {target_node_id}")
+                        return True
+                else:
+                    print(f"\n✗ Transfer failed: {result}")
+                    return False
+                    
+            except Exception as e:
+                print(f"\n✗ Error during transfer: {e}")
+                return False
+            
+            time.sleep(0.1)
+    
+    return False
+
+
+def interactive_mode(network_client, network_host, network_port):
+    """Interactive mode for file transfers"""
+    print(f"\n{'='*70}")
+    print("INTERACTIVE FILE TRANSFER MODE")
+    print(f"{'='*70}")
+    
+    while True:
+        print(f"\nOptions:")
+        print("  1. List all nodes and their files")
+        print("  2. Transfer file between nodes")
+        print("  3. Create file on a node")
+        print("  4. Show network statistics")
+        print("  5. Exit")
+        
+        try:
+            choice = input("\nEnter your choice (1-5): ").strip()
+            
+            if choice == '1':
+                list_nodes_and_files(network_client, network_host, network_port)
+            
+            elif choice == '2':
+                transfer_file_interactive(network_client, network_host, network_port)
+            
+            elif choice == '3':
+                create_file_interactive(network_client, network_host, network_port)
+            
+            elif choice == '4':
+                show_network_stats(network_client)
+            
+            elif choice == '5':
+                print("Exiting interactive mode...")
+                break
+            
+            else:
+                print("Invalid choice! Please enter 1-5.")
+                
+        except KeyboardInterrupt:
+            print("\nExiting interactive mode...")
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+
+
+def list_nodes_and_files(network_client, network_host, network_port):
+    """List all nodes and the files they contain"""
+    print(f"\n{'='*70}")
+    print("NODES AND FILES OVERVIEW")
+    print(f"{'='*70}")
+    
+    # Get nodes from network
+    nodes_list = network_client.list_nodes()
+    
+    if 'error' in nodes_list:
+        print(f"✗ Failed to connect to network: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    
+    if len(registered_nodes) == 0:
+        print("No nodes registered with the network")
+        return
+    
+    # Parse node information
+    nodes_info = {}
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict):
+            nodes_info[node_id] = {
+                'address': node_data.get('address', ''),
+                'status': node_data.get('status', 'unknown')
+            }
+        else:
+            nodes_info[node_id] = {
+                'address': node_data,
+                'status': 'online'
+            }
+    
+    # Create node clients and get file lists
+    node_clients = {}
+    for node_id, info in nodes_info.items():
+        if info['status'] == 'online' and ':' in info['address']:
+            host, port = info['address'].split(':')
+            node_clients[node_id] = NodeClient(host, int(port))
+    
+    # Display nodes and their files
+    for node_id, client in node_clients.items():
+        print(f"\n● {node_id.upper()} [{nodes_info[node_id]['status'].upper()}]:")
+        print(f"  Address: {nodes_info[node_id]['address']}")
+        
+        # Get node info
+        node_info = client.info()
+        if 'error' not in node_info:
+            print(f"  Storage: {node_info.get('total_storage', 0) / (1024**3):.0f} GB")
+        
+        # Get files list
+        files_result = client.list_files()
+        if files_result.get('success'):
+            files = files_result.get('files', [])
+            if files:
+                print(f"  Files ({len(files)}):")
+                for file_info in files:
+                    print(f"    - {file_info['name']} ({file_info['size_mb']:.2f} MB)")
+            else:
+                print("  Files: No files stored")
+        else:
+            print("  Files: Unable to retrieve file list")
+    
+    print(f"\nTotal nodes: {len(registered_nodes)}")
+    online_count = sum(1 for info in nodes_info.values() if info['status'] == 'online')
+    print(f"Online nodes: {online_count}")
+
+
+def transfer_file_interactive(network_client, network_host, network_port):
+    """Interactive file transfer between nodes"""
+    print(f"\n{'='*70}")
+    print("FILE TRANSFER")
+    print(f"{'='*70}")
+    
+    # Get available nodes
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to get nodes: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    online_nodes = {node_id: info for node_id, info in registered_nodes.items() 
+                   if isinstance(info, dict) and info.get('status') == 'online'}
+    
+    if len(online_nodes) < 2:
+        print("Need at least 2 online nodes for file transfer")
+        return
+    
+    # Select source node
+    print("\nAvailable source nodes:")
+    node_list = list(online_nodes.keys())
+    for i, node_id in enumerate(node_list, 1):
+        print(f"  {i}. {node_id}")
+    
+    try:
+        source_choice = int(input(f"\nSelect source node (1-{len(node_list)}): ")) - 1
+        source_node_id = node_list[source_choice]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get files from source node
+    source_info = online_nodes[source_node_id]
+    if ':' not in source_info['address']:
+        print("Invalid node address")
+        return
+    
+    host, port = source_info['address'].split(':')
+    source_client = NodeClient(host, int(port))
+    
+    files_result = source_client.list_files()
+    if not files_result.get('success'):
+        print(f"✗ Failed to get files from {source_node_id}: {files_result.get('error')}")
+        return
+    
+    source_files = files_result.get('files', [])
+    if not source_files:
+        print(f"✗ No files available on {source_node_id}")
+        return
+    
+    # Select file from source node
+    print(f"\nFiles available on {source_node_id}:")
+    for i, file_info in enumerate(source_files, 1):
+        print(f"  {i}. {file_info['name']} ({file_info['size_mb']:.2f} MB)")
+    
+    try:
+        file_choice = int(input(f"\nSelect file to transfer (1-{len(source_files)}): ")) - 1
+        selected_file = source_files[file_choice]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Select target node
+    print(f"\nAvailable target nodes (excluding {source_node_id}):")
+    target_nodes = [node_id for node_id in node_list if node_id != source_node_id]
+    for i, node_id in enumerate(target_nodes, 1):
+        print(f"  {i}. {node_id}")
+    
+    try:
+        target_choice = int(input(f"\nSelect target node (1-{len(target_nodes)}): ")) - 1
+        target_node_id = target_nodes[target_choice]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get bandwidth
+    try:
+        bandwidth = int(input("\nEnter connection bandwidth in Mbps (default: 1000): ") or "1000")
+    except ValueError:
+        bandwidth = 1000
+    
+    # Create connection
+    print(f"\nCreating connection {source_node_id} <-> {target_node_id} @ {bandwidth}Mbps...")
+    conn_result = network_client.create_connection(source_node_id, target_node_id, bandwidth)
+    if not conn_result.get('success'):
+        print(f"✗ Failed to create connection: {conn_result}")
+        return
+    print("✓ Connection created successfully!")
+    
+    # Transfer file
+    file_name = selected_file['name']
+    file_size_bytes = selected_file['size_bytes']
+    
+    success = transfer_file(
+        network_client=network_client,
+        source_node_id=source_node_id,
+        target_node_id=target_node_id,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        chunks_per_step=3
+    )
+    
+    if success:
+        print(f"\n✓ File transfer completed: {file_name} from {source_node_id} to {target_node_id}")
+    else:
+        print(f"\n✗ File transfer failed")
+
+
+def create_file_interactive(network_client, network_host, network_port):
+    """Create a file on a specific node"""
+    print(f"\n{'='*70}")
+    print("CREATE FILE ON NODE")
+    print(f"{'='*70}")
+    
+    # Get available nodes
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to get nodes: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    online_nodes = {node_id: info for node_id, info in registered_nodes.items() 
+                   if isinstance(info, dict) and info.get('status') == 'online'}
+    
+    if not online_nodes:
+        print("No online nodes available")
+        return
+    
+    # Select node
+    print("\nAvailable nodes:")
+    node_list = list(online_nodes.keys())
+    for i, node_id in enumerate(node_list, 1):
+        print(f"  {i}. {node_id}")
+    
+    try:
+        node_choice = int(input(f"\nSelect node (1-{len(node_list)}): ")) - 1
+        selected_node_id = node_list[node_choice]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get node client
+    node_info = online_nodes[selected_node_id]
+    if ':' not in node_info['address']:
+        print("Invalid node address")
+        return
+    
+    host, port = node_info['address'].split(':')
+    node_client = NodeClient(host, int(port))
+    
+    # Get file details
+    file_name = input("\nEnter file name: ").strip()
+    if not file_name:
+        print("File name cannot be empty!")
+        return
+    
+    try:
+        file_size_mb = float(input("Enter file size in MB: ").strip())
+        if file_size_mb <= 0:
+            print("File size must be positive!")
+            return
+    except ValueError:
+        print("Invalid file size!")
+        return
+    
+    print("\nContent types:")
+    print("  1. Random data (default)")
+    print("  2. Text data")
+    print("  3. Binary data")
+    content_choice = input("Choose content type (1-3, default 1): ").strip()
+    
+    content_type = 'random'
+    if content_choice == '2':
+        content_type = 'text'
+    elif content_choice == '3':
+        content_type = 'binary'
+    
+    # Create file
+    print(f"\nCreating file '{file_name}' ({file_size_mb} MB) on {selected_node_id}...")
+    result = node_client.create_file(file_name, file_size_mb, content_type)
+    
+    if result.get('success'):
+        print(f"✓ File created successfully!")
+        print(f"  Node: {selected_node_id}")
+        print(f"  File: {result['file_name']}")
+        print(f"  Size: {result['actual_size_bytes'] / (1024*1024):.2f} MB")
+        print(f"  Path: {result['file_path']}")
+    else:
+        print(f"✗ Failed to create file: {result.get('error', 'Unknown error')}")
+
+
+def show_network_stats(network_client):
+    """Display network statistics"""
+    print(f"\n{'='*70}")
+    print("NETWORK STATISTICS")
+    print(f"{'='*70}")
+    
+    try:
+        stats = network_client.network_stats()
+        
+        print(f"\nNetwork Overview:")
+        print(f"  Total Nodes:      {stats['total_nodes']}")
+        print(f"  Online Nodes:     {stats.get('online_nodes', 0)}")
+        print(f"  Offline Nodes:    {stats.get('offline_nodes', 0)}")
+        print(f"  Storage Used:     {stats['used_storage_bytes'] / (1024**3):.2f}GB / " +
+              f"{stats['total_storage_bytes'] / (1024**3):.2f}GB " +
+              f"({stats['storage_utilization_percent']:.1f}%)")
+        print(f"  Active Transfers: {stats['active_transfers']}")
+        print(f"  Completed:        {stats['completed_transfers']}")
+        
+    except Exception as e:
+        print(f"Could not retrieve network stats: {e}")
 
 
 def main():
@@ -140,8 +543,34 @@ def main():
                        help='Number of chunks to process per step (default: 3)')
     parser.add_argument('--connection-bandwidth', type=int, default=1000,
                        help='Connection bandwidth in Mbps (default: 1000)')
+    parser.add_argument('--interactive', action='store_true',
+                       help='Start in interactive mode')
     
     args = parser.parse_args()
+    
+    # Create network client
+    network_client = NetworkClient(args.network_host, args.network_port)
+    
+    # Test connection to network
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to connect to network: {nodes_list['error']}")
+        print(f"\nMake sure network coordinator is running:")
+        print(f"  python storage_virtual_network.py --port {args.network_port}")
+        return
+    
+    print("=" * 70)
+    print("THREADED STORAGE VIRTUAL NETWORK CLIENT")
+    print("=" * 70)
+    print(f"Connected to network at {args.network_host}:{args.network_port}")
+    
+    # Start interactive mode if requested
+    if args.interactive:
+        interactive_mode(network_client, args.network_host, args.network_port)
+        return
+    
+    # Otherwise run the original automated transfer
+    print("Running automated file transfer...")
     
     # Determine file info
     if args.file_path and os.path.exists(args.file_path):
@@ -156,16 +585,9 @@ def main():
         if args.file_path:
             print(f"Warning: File '{args.file_path}' not found, using simulated transfer")
     
-    print("=" * 70)
-    print("THREADED STORAGE VIRTUAL NETWORK - FILE TRANSFER SIMULATION")
-    print("=" * 70)
-    print(f"\nConnecting to network at {args.network_host}:{args.network_port}")
-    print(f"Transfer: {args.source_node} → {args.target_node}")
+    print(f"\nTransfer: {args.source_node} → {args.target_node}")
     print(f"File: {file_name} ({file_size_mb:.2f}MB)")
     print(f"Chunks per step: {args.chunks_per_step}")
-    
-    # Create network client
-    network_client = NetworkClient(args.network_host, args.network_port)
     
     # ========================================================================
     # STEP 1: Discover registered nodes
@@ -175,33 +597,17 @@ def main():
     print("=" * 70)
     
     nodes_list = network_client.list_nodes()
-    
-    if 'error' in nodes_list:
-        print(f"✗ Failed to connect to network: {nodes_list['error']}")
-        print(f"\nMake sure network coordinator is running:")
-        print(f"  python threaded_network_server.py --port {args.network_port}")
-        return
-    
     registered_nodes = nodes_list.get('nodes', {})
-    
-    if len(registered_nodes) == 0:
-        print("✗ No nodes registered with the network yet")
-        print(f"\nStart some nodes first:")
-        print(f"  python threaded_node_server.py --node-id node1 --network-port {args.network_port}")
-        print(f"  python threaded_node_server.py --node-id node2 --network-port {args.network_port}")
-        return
     
     # Parse node information (handle both dict and string formats)
     nodes_info = {}
     for node_id, node_data in registered_nodes.items():
         if isinstance(node_data, dict):
-            # New format with status
             nodes_info[node_id] = {
                 'address': node_data.get('address', ''),
                 'status': node_data.get('status', 'unknown')
             }
         else:
-            # Old format (just address string)
             nodes_info[node_id] = {
                 'address': node_data,
                 'status': 'online'
@@ -246,42 +652,10 @@ def main():
         return
     
     # ========================================================================
-    # STEP 2: Display network topology
+    # STEP 2: Create network connections
     # ========================================================================
     print("\n" + "=" * 70)
-    print("[2/5] NETWORK TOPOLOGY")
-    print("=" * 70)
-    
-    # Create clients for each node to get detailed info
-    node_clients = {}
-    for node_id, info in nodes_info.items():
-        address = info['address']
-        if ':' in address:
-            host, port = address.split(':')
-            node_clients[node_id] = NodeClient(host, int(port))
-    
-    for node_id, client in node_clients.items():
-        node_info = client.info()
-        status = nodes_info[node_id]['status']
-        status_symbol = "●" if status == "online" else "○"
-        
-        if 'error' not in node_info:
-            print(f"\n{status_symbol} {node_id.upper()} [{status.upper()}]:")
-            print(f"  Address:   {nodes_info[node_id]['address']}")
-            print(f"  CPU:       {node_info.get('cpu_capacity')} vCPUs")
-            print(f"  Memory:    {node_info.get('memory_capacity')} GB")
-            print(f"  Storage:   {node_info.get('total_storage', 0) / (1024**3):.0f} GB")
-            print(f"  Bandwidth: {node_info.get('bandwidth', 0) / 1000000:.0f} Mbps")
-        else:
-            print(f"\n{status_symbol} {node_id.upper()} [{status.upper()}]:")
-            print(f"  Address:   {nodes_info[node_id]['address']}")
-            print(f"  Status:    Unable to retrieve info (node may be offline)")
-    
-    # ========================================================================
-    # STEP 3: Create network connections
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("[3/5] CREATING NETWORK CONNECTIONS")
+    print("[2/5] CREATING NETWORK CONNECTIONS")
     print("=" * 70)
     
     result = network_client.create_connection(
@@ -296,119 +670,33 @@ def main():
         print(f"✗ Failed to connect nodes: {result}")
         return
     
+    # ========================================================================
+    # STEP 3: File transfer operation
+    # ========================================================================
     print("\n" + "=" * 70)
-    print("[4/5] FILE TRANSFER OPERATION")
+    print("[3/5] FILE TRANSFER OPERATION")
     print("=" * 70)
     
-    print(f"\nInitiating transfer: {file_name} ({file_size_mb:.2f}MB)")
-    print(f"Source: {args.source_node} → Target: {args.target_node}")
-    
-    transfer_result = network_client.initiate_transfer(
+    success = transfer_file(
+        network_client=network_client,
         source_node_id=args.source_node,
         target_node_id=args.target_node,
         file_name=file_name,
-        file_size=file_size_bytes
+        file_size_bytes=file_size_bytes,
+        chunks_per_step=args.chunks_per_step
     )
     
-    if not transfer_result.get('success'):
-        print(f"✗ Failed to initiate transfer: {transfer_result}")
+    if not success:
         return
     
-    file_id = transfer_result['file_id']
-    total_chunks = transfer_result['total_chunks']
-    print(f"✓ Transfer initiated (ID: {file_id[:8]}...)")
-    print(f"✓ Total chunks: {total_chunks}")
-    
-    # Process transfer with progress bar
-    print(f"\nProcessing transfer with {args.chunks_per_step} chunks per step...")
-    print("-" * 70)
-    
-    with tqdm(total=total_chunks, desc="Transferring", unit="chunk",
-              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-              ncols=70) as pbar:
-        completed = False
-        total_start_time = time.time()
-        
-        while not completed:
-            # Tick the network
-            network_client.tick()
-            
-            # Process chunks
-            try:
-                result = network_client.process_transfer(file_id, args.chunks_per_step)
-                
-                if result.get('success'):
-                    chunks_processed = result['chunks_processed']
-                    pbar.update(chunks_processed)
-                    completed = result.get('completed', False)
-                    
-                    if completed:
-                        total_time = time.time() - total_start_time
-                        print(f"\n✓ Transfer completed successfully!")
-                        print(f"  Total time: {total_time:.2f} seconds")
-                        print(f"  Average speed: {(file_size_mb / total_time):.2f} MB/s")
-                        print(f"\n  File stored on {args.target_node}")
-                        
-                        # Get target node info to show where file is stored
-                        if args.target_node in node_clients:
-                            storage = node_clients[args.target_node].storage_stats()
-                            if 'actual_disk_usage_mb' in storage:
-                                print(f"  Actual disk usage: {storage['actual_disk_usage_mb']:.2f} MB")
-                        
-                        break
-                else:
-                    print(f"\n✗ Transfer failed: {result}")
-                    break
-                    
-            except Exception as e:
-                print(f"\n✗ Error during transfer: {e}")
-                break
-            
-            time.sleep(0.1)
-    
     # ========================================================================
-    # STEP 5: Display final statistics
+    # STEP 4: Display final statistics
     # ========================================================================
     print("\n" + "=" * 70)
-    print("[5/5] FINAL STATISTICS")
+    print("[4/5] FINAL STATISTICS")
     print("=" * 70)
     
-    try:
-        stats = network_client.network_stats()
-        
-        print(f"\nNetwork Overview:")
-        print(f"  Total Nodes:      {stats['total_nodes']}")
-        print(f"  Online Nodes:     {stats.get('online_nodes', 0)}")
-        print(f"  Offline Nodes:    {stats.get('offline_nodes', 0)}")
-        print(f"  Storage Used:     {stats['used_storage_bytes'] / (1024**3):.2f}GB / " +
-              f"{stats['total_storage_bytes'] / (1024**3):.2f}GB " +
-              f"({stats['storage_utilization_percent']:.1f}%)")
-        print(f"  Active Transfers: {stats['active_transfers']}")
-        print(f"  Completed:        {stats['completed_transfers']}")
-        
-        # Get node-specific stats
-        print(f"\nNode-Specific Details:")
-        print("-" * 70)
-        
-        for node_id in [args.source_node, args.target_node]:
-            if node_id in node_clients:
-                try:
-                    storage = node_clients[node_id].storage_stats()
-                    perf = node_clients[node_id].performance_stats()
-                    
-                    print(f"\n{node_id.upper()}:")
-                    print(f"  Storage:  {storage['used_bytes'] / (1024**3):.2f}GB / " +
-                          f"{storage['total_bytes'] / (1024**3):.2f}GB " +
-                          f"({storage['utilization_percent']:.1f}%)")
-                    print(f"  Files:    {storage['files_stored']}")
-                    print(f"  Data Tx:  {perf['total_data_transferred_bytes'] / (1024**2):.2f}MB")
-                    print(f"  Requests: {perf['total_requests_processed']}")
-                    
-                except Exception as e:
-                    print(f"  Error getting stats: {e}")
-                
-    except Exception as e:
-        print(f"Could not retrieve network stats: {e}")
+    show_network_stats(network_client)
     
     print("\n" + "=" * 70)
     print("\n✓ Simulation completed successfully!\n")
