@@ -660,6 +660,366 @@ def manage_node_status(network_client, network_host, network_port):
         print(f"Simulated Status: {current_simulated_status.upper()}")
     print(f"Address: {selected_node_info['address']}")
     
+    # Show management options
+    print(f"\nManagement Options for {selected_node_id}:")
+    print("  1. Set node ONLINE")
+    print("  2. Set node OFFLINE")
+    print("  3. Test node connectivity")
+    
+    try:
+        action_choice = input("\nSelect action (1-3): ").strip()
+        
+        if action_choice == '1':
+            # Set node online - BOTH network and node
+            print(f"\nSetting {selected_node_id} to ONLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "online")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator: {selected_node_id} -> ONLINE")
+                old_status = network_result.get('old_status', 'unknown')
+                if old_status != 'online':
+                    print(f"  Status changed from {old_status} to online")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+                return
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                try:
+                    node_result = node_clients[selected_node_id].set_online_status(True)
+                    if node_result.get('success'):
+                        print(f"✓ Node {selected_node_id} set to ONLINE")
+                        old_node_status = node_result.get('old_status', 'unknown')
+                        if old_node_status != 'online':
+                            print(f"  Node status changed from {old_node_status} to online")
+                    else:
+                        print(f"⚠ Could not update node directly: {node_result.get('error')}")
+                except Exception as e:
+                    print(f"⚠ Could not reach node for direct update: {e}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+            
+            print(f"\n✓ {selected_node_id} is now ONLINE in the network")
+        
+        elif action_choice == '2':
+            # Set node offline - BOTH network and node
+            print(f"\nSetting {selected_node_id} to OFFLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "offline")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator: {selected_node_id} -> OFFLINE")
+                old_status = network_result.get('old_status', 'unknown')
+                if old_status != 'offline':
+                    print(f"  Status changed from {old_status} to offline")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+                return
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                try:
+                    node_result = node_clients[selected_node_id].set_online_status(False)
+                    if node_result.get('success'):
+                        print(f"✓ Node {selected_node_id} set to OFFLINE")
+                        old_node_status = node_result.get('old_status', 'unknown')
+                        if old_node_status != 'offline':
+                            print(f"  Node status changed from {old_node_status} to offline")
+                    else:
+                        print(f"⚠ Could not update node directly: {node_result.get('error')}")
+                except Exception as e:
+                    print(f"⚠ Could not reach node for direct update: {e}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+            
+            print(f"\n✓ {selected_node_id} is now OFFLINE in the network")
+        
+        elif action_choice == '3':
+            # Test connectivity
+            print(f"\nTesting connectivity to {selected_node_id}...")
+            if selected_node_id in node_clients:
+                # Test basic health
+                health_result = node_clients[selected_node_id]._send_request("health", {})
+                if 'error' in health_result:
+                    print(f"✗ Node is unreachable: {health_result['error']}")
+                else:
+                    print(f"✓ Node is reachable and healthy")
+                
+                # Test simulated status
+                simulated_offline = _check_simulated_offline(node_clients[selected_node_id])
+                status = "OFFLINE" if simulated_offline else "ONLINE"
+                print(f"  Simulated status: {status}")
+                
+                # Test other commands
+                info_result = node_clients[selected_node_id].info()
+                if 'error' in info_result:
+                    print(f"  Info command: Failed ({info_result['error']})")
+                else:
+                    print(f"  Info command: Success")
+            else:
+                print(f"✗ Node is not reachable at {selected_node_info['address']}")
+        
+        else:
+            print("Invalid action!")
+            
+    except Exception as e:
+        print(f"Error during management: {e}")
+    """Manage node online/offline status"""
+    print(f"\n{'='*70}")
+    print("MANAGE NODE ONLINE/OFFLINE STATUS")
+    print(f"{'='*70}")
+    
+    # Get available nodes
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to get nodes: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    
+    if not registered_nodes:
+        print("No nodes registered with the network")
+        return
+    
+    # Display nodes and their current status
+    print("\nCurrent Node Status:")
+    print("-" * 50)
+    
+    nodes_info = {}
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict):
+            nodes_info[node_id] = {
+                'address': node_data.get('address', ''),
+                'status': node_data.get('status', 'unknown')
+            }
+        else:
+            nodes_info[node_id] = {
+                'address': node_data,
+                'status': 'online'
+            }
+    
+    # Create node clients for nodes that are reachable
+    node_clients = {}
+    for node_id, info in nodes_info.items():
+        if ':' in info['address']:
+            host, port = info['address'].split(':')
+            node_clients[node_id] = NodeClient(host, int(port))
+    
+    # Display nodes
+    for i, (node_id, info) in enumerate(nodes_info.items(), 1):
+        status_symbol = "●" if info['status'] == 'online' else "○"
+        # Check actual node status if reachable
+        actual_status = info['status']
+        if node_id in node_clients:
+            try:
+                node_status_result = node_clients[node_id]._send_request("health", {})
+                if 'error' in node_status_result:
+                    actual_status = "offline"
+                else:
+                    # Try to get more detailed status
+                    info_result = node_clients[node_id].info()
+                    if 'error' in info_result and 'offline' in info_result['error'].lower():
+                        actual_status = "offline"
+            except:
+                actual_status = "offline"
+        
+        status_text = f"{info['status'].upper()}"
+        if info['status'] != actual_status:
+            status_text += f" (node reports: {actual_status.upper()})"
+        
+        print(f"  {i}. {status_symbol} {node_id} - {status_text}")
+    
+    # Select node to manage
+    try:
+        node_choice = int(input(f"\nSelect node to manage (1-{len(nodes_info)}): ")) - 1
+        selected_node_id = list(nodes_info.keys())[node_choice]
+        selected_node_info = nodes_info[selected_node_id]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get current status details
+    current_network_status = selected_node_info['status']
+    
+    print(f"\nNode: {selected_node_id}")
+    print(f"Network Status: {current_network_status.upper()}")
+    print(f"Address: {selected_node_info['address']}")
+    
+    # Show management options
+    print(f"\nManagement Options for {selected_node_id}:")
+    print("  1. Set node ONLINE")
+    print("  2. Set node OFFLINE")
+    print("  3. Test node connectivity")
+    
+    try:
+        action_choice = input("\nSelect action (1-3): ").strip()
+        
+        if action_choice == '1':
+            # Set node online - BOTH network and node
+            print(f"\nSetting {selected_node_id} to ONLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "online")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator: {selected_node_id} -> ONLINE")
+                old_status = network_result.get('old_status', 'unknown')
+                if old_status != 'online':
+                    print(f"  Status changed from {old_status} to online")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+                return
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                try:
+                    node_result = node_clients[selected_node_id].set_online_status(True)
+                    if node_result.get('success'):
+                        print(f"✓ Node {selected_node_id} set to ONLINE")
+                        old_node_status = node_result.get('old_status', 'unknown')
+                        if old_node_status != 'online':
+                            print(f"  Node status changed from {old_node_status} to online")
+                    else:
+                        print(f"⚠ Could not update node directly: {node_result.get('error')}")
+                except Exception as e:
+                    print(f"⚠ Could not reach node for direct update: {e}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+            
+            print(f"\n✓ {selected_node_id} is now ONLINE in the network")
+        
+        elif action_choice == '2':
+            # Set node offline - BOTH network and node
+            print(f"\nSetting {selected_node_id} to OFFLINE...")
+            
+            # First update network coordinator
+            network_result = network_client.set_node_status(selected_node_id, "offline")
+            if network_result.get('success'):
+                print(f"✓ Network coordinator: {selected_node_id} -> OFFLINE")
+                old_status = network_result.get('old_status', 'unknown')
+                if old_status != 'offline':
+                    print(f"  Status changed from {old_status} to offline")
+            else:
+                print(f"✗ Failed to update network coordinator: {network_result.get('error')}")
+                return
+            
+            # Then update the node itself if reachable
+            if selected_node_id in node_clients:
+                try:
+                    node_result = node_clients[selected_node_id].set_online_status(False)
+                    if node_result.get('success'):
+                        print(f"✓ Node {selected_node_id} set to OFFLINE")
+                        old_node_status = node_result.get('old_status', 'unknown')
+                        if old_node_status != 'offline':
+                            print(f"  Node status changed from {old_node_status} to offline")
+                    else:
+                        print(f"⚠ Could not update node directly: {node_result.get('error')}")
+                except Exception as e:
+                    print(f"⚠ Could not reach node for direct update: {e}")
+            else:
+                print(f"⚠ Node {selected_node_id} is not reachable for direct status update")
+            
+            print(f"\n✓ {selected_node_id} is now OFFLINE in the network")
+        
+        elif action_choice == '3':
+            # Test connectivity
+            print(f"\nTesting connectivity to {selected_node_id}...")
+            if selected_node_id in node_clients:
+                # Test basic health
+                health_result = node_clients[selected_node_id]._send_request("health", {})
+                if 'error' in health_result:
+                    print(f"✗ Node is unreachable: {health_result['error']}")
+                else:
+                    print(f"✓ Node is reachable and healthy")
+                
+                # Test info command to check if node rejects requests
+                info_result = node_clients[selected_node_id].info()
+                if 'error' in info_result:
+                    if 'offline' in info_result['error'].lower():
+                        print(f"  Node status: OFFLINE (rejecting requests)")
+                    else:
+                        print(f"  Info command: Failed ({info_result['error']})")
+                else:
+                    print(f"  Info command: Success")
+                    print(f"  Node status: ONLINE (accepting requests)")
+            else:
+                print(f"✗ Node is not reachable at {selected_node_info['address']}")
+        
+        else:
+            print("Invalid action!")
+            
+    except Exception as e:
+        print(f"Error during management: {e}")
+    """Manage node online/offline status"""
+    print(f"\n{'='*70}")
+    print("MANAGE NODE ONLINE/OFFLINE STATUS")
+    print(f"{'='*70}")
+    
+    # Get available nodes
+    nodes_list = network_client.list_nodes()
+    if 'error' in nodes_list:
+        print(f"✗ Failed to get nodes: {nodes_list['error']}")
+        return
+    
+    registered_nodes = nodes_list.get('nodes', {})
+    
+    if not registered_nodes:
+        print("No nodes registered with the network")
+        return
+    
+    # Display nodes and their current status
+    print("\nCurrent Node Status:")
+    print("-" * 50)
+    
+    nodes_info = {}
+    for node_id, node_data in registered_nodes.items():
+        if isinstance(node_data, dict):
+            nodes_info[node_id] = {
+                'address': node_data.get('address', ''),
+                'status': node_data.get('status', 'unknown')
+            }
+        else:
+            nodes_info[node_id] = {
+                'address': node_data,
+                'status': 'online'
+            }
+    
+    # Create node clients for nodes that are reachable
+    node_clients = {}
+    for node_id, info in nodes_info.items():
+        if info['status'] == 'online' and ':' in info['address']:
+            host, port = info['address'].split(':')
+            node_clients[node_id] = NodeClient(host, int(port))
+    
+    # Display nodes
+    for i, (node_id, info) in enumerate(nodes_info.items(), 1):
+        status_symbol = "●" if info['status'] == 'online' else "○"
+        simulated_status = " (simulated offline)" if node_id in node_clients and _check_simulated_offline(node_clients[node_id]) else ""
+        print(f"  {i}. {status_symbol} {node_id} - {info['status'].upper()}{simulated_status}")
+    
+    # Select node to manage
+    try:
+        node_choice = int(input(f"\nSelect node to manage (1-{len(nodes_info)}): ")) - 1
+        selected_node_id = list(nodes_info.keys())[node_choice]
+        selected_node_info = nodes_info[selected_node_id]
+    except (ValueError, IndexError):
+        print("Invalid selection!")
+        return
+    
+    # Get current status details
+    current_network_status = selected_node_info['status']
+    current_simulated_status = "unknown"
+    
+    if selected_node_id in node_clients:
+        simulated_offline = _check_simulated_offline(node_clients[selected_node_id])
+        current_simulated_status = "offline" if simulated_offline else "online"
+    
+    print(f"\nNode: {selected_node_id}")
+    print(f"Network Status: {current_network_status.upper()}")
+    if selected_node_id in node_clients:
+        print(f"Simulated Status: {current_simulated_status.upper()}")
+    print(f"Address: {selected_node_info['address']}")
+    
     # Show management options - MERGED OPTIONS
     print(f"\nManagement Options for {selected_node_id}:")
     print("  1. Set node ONLINE")

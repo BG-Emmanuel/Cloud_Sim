@@ -21,7 +21,7 @@ class ThreadedNetworkServer:
         self.host = host
         self.port = port
         self.nodes: Dict[str, str] = {}  # node_id -> "host:port"
-        self.node_status: Dict[str, str] = {}  # node_id -> "online"/"offline" (manual control)
+        self.node_status: Dict[str, str] = {}  # node_id -> "online"/"offline"
         self.connections: Dict[str, Dict[str, int]] = defaultdict(dict)
         self.active_transfers: Dict[str, dict] = {}
         self.running = False
@@ -112,7 +112,7 @@ class ThreadedNetworkServer:
                     self.nodes[node_id] = node_address
                     self.node_status[node_id] = "online"
                 
-                print(f"[Network] Registered {node_id} at {node_address} [ONLINE]")
+                print(f"● [Network] Registered {node_id} at {node_address} [ONLINE]")
                 return {"success": True, "registered": node_id, "status": "online"}
             
             elif command == "unregister_node":
@@ -140,6 +140,7 @@ class ThreadedNetworkServer:
             elif command == "set_node_status":
                 node_id = args.get('node_id')
                 status = args.get('status')  # 'online' or 'offline'
+                source = args.get('source', 'network')  # 'network' or 'node'
                 
                 if not node_id or status not in ['online', 'offline']:
                     return {"error": "Missing node_id or invalid status"}
@@ -149,15 +150,18 @@ class ThreadedNetworkServer:
                         old_status = self.node_status.get(node_id, 'unknown')
                         self.node_status[node_id] = status
                         
-                        # Log the status change
+                        # Log the status change with source information and visual indicator
+                        source_info = f" from {source}" if source != 'network' else ""
+                        status_symbol = "●" if status == "online" else "○"
+                        
                         if old_status != status:
-                            print(f"[Network] Node {node_id} status changed: {old_status} -> {status}")
+                            print(f"{status_symbol} [Network] Node {node_id} status changed{source_info}: {old_status} -> {status}")
                             
                             # If setting to offline, cancel any active transfers involving this node
                             if status == "offline":
                                 self._cancel_transfers_for_node(node_id)
                         else:
-                            print(f"[Network] Node {node_id} status remains: {status}")
+                            print(f"{status_symbol} [Network] Node {node_id} status remains{source_info}: {status}")
                         
                         return {
                             "success": True, 

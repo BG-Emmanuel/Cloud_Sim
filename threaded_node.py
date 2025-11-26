@@ -247,10 +247,40 @@ class ThreadedNodeServer:
                 elif command == "set_online_status":
                     # Special command to change online/offline status
                     online = args.get('online', True)
+                    old_status = "online" if not self.simulated_offline else "offline"
                     self.simulated_offline = not online
-                    status = "online" if online else "offline"
-                    print(f"[Node {self.node.node_id}] Simulated status changed to: {status}")
-                    return {"success": True, "node_id": self.node.node_id, "status": status}
+                    new_status = "online" if online else "offline"
+                    
+                    # Notify network coordinator about status change
+                    if self.registered and self.network_host and self.network_port:
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(5)
+                            sock.connect((self.network_host, self.network_port))
+                            
+                            request = {
+                                "command": "set_node_status",
+                                "args": {
+                                    "node_id": self.node.node_id,
+                                    "status": new_status
+                                }
+                            }
+                            
+                            sock.sendall(json.dumps(request).encode('utf-8'))
+                            data = sock.recv(4096)
+                            response = json.loads(data.decode('utf-8'))
+                            
+                            sock.close()
+                            
+                            if response.get('success'):
+                                print(f"[Node {self.node.node_id}] Network coordinator notified: {old_status} -> {new_status}")
+                            else:
+                                print(f"[Node {self.node.node_id}] Failed to notify network: {response.get('error')}")
+                        except Exception as e:
+                            print(f"[Node {self.node.node_id}] Error notifying network: {e}")
+                    
+                    print(f"[Node {self.node.node_id}] Status changed: {old_status} -> {new_status}")
+                    return {"success": True, "node_id": self.node.node_id, "status": new_status, "old_status": old_status}
                 
                 else:
                     return {"error": f"Unknown command: {command}"}
@@ -571,21 +601,22 @@ def interactive_mode(server: ThreadedNodeServer):
                 # Set online/offline status
                 current_status = "online" if not server.simulated_offline else "offline"
                 print(f"\nCurrent status: {current_status.upper()}")
-                print("1. Set ONLINE")
-                print("2. Set OFFLINE (simulated)")
+                print("1. Go ONLINE (accept requests)")
+                print("2. Go OFFLINE (reject requests)")
                 
                 status_choice = input("Select status (1-2): ").strip()
                 if status_choice == '1':
                     result = server._process_command("set_online_status", {"online": True})
                     if result.get('success'):
-                        print("✓ Node set to ONLINE")
+                        print("✓ Node set to ONLINE - accepting requests")
+                        print("  Network coordinator has been notified")
                     else:
                         print(f"✗ Failed to set node online: {result.get('error')}")
                 elif status_choice == '2':
                     result = server._process_command("set_online_status", {"online": False})
                     if result.get('success'):
-                        print("✓ Node set to OFFLINE (simulated)")
-                        print("  Node will reject requests but remain registered with network")
+                        print("✓ Node set to OFFLINE - rejecting requests")
+                        print("  Network coordinator has been notified")
                     else:
                         print(f"✗ Failed to set node offline: {result.get('error')}")
                 else:
