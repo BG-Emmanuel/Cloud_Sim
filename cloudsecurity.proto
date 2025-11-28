@@ -1,20 +1,73 @@
-// generate the skeleton and stub classes
-// generate calculator_pb2.py and calculator_pb2_grpc.py.
-// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. calculator.proto
+// cloudsecurity.proto
+// Protobuf definitions for user authentication flows:
+// - Signup (create account)
+// - Login (username/email + password)
+// - VerifyOTP (verify one-time password sent to user)
+//
+// To regenerate Python stubs:
+// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. cloudsecurity.proto
 
 syntax = "proto3";
 
 package cloud;
 
 service UserService {
-  rpc login (Request) returns (Response);
+  // Create a new user account. If an OTP verification step is required,
+  // the response will include `otp_required` and a `temp_token` used for verification.
+  rpc Signup (SignupRequest) returns (AuthResponse);
+
+  // Authenticate a user with login (username or email) and password.
+  // On success an `auth_token` may be returned. If the server requires
+  // an OTP to complete login this response will set `otp_required = true`
+  // and return a `temp_token` for the verification step.
+  rpc Login (LoginRequest) returns (AuthResponse);
+
+  // Verify a one-time password previously issued during signup/login.
+  // Requires the `temp_token` provided by the prior Signup/Login response
+  // (when `otp_required` was true).
+  rpc VerifyOTP (VerifyOTPRequest) returns (VerifyOTPResponse);
 }
 
-message Request {
-  string login = 1;
+// Signup request: user chooses a username, provides an email and password.
+message SignupRequest {
+  string username = 1;
+  string email = 2;
+  string password = 3;
+}
+
+// Login request: login may be a username or email.
+message LoginRequest {
+  string login = 1; // username or email
   string password = 2;
 }
 
-message Response {
-  string result = 1;
+// Generic authentication response used by Signup and Login.
+// - `success` indicates whether the operation succeeded.
+// - `message` provides a human-readable status.
+// - `otp_required` indicates the server expects an OTP verification step.
+// - `temp_token` is a short-lived token used to bind the OTP verification
+//   to the prior operation.
+// - `auth_token` is a long-lived token returned when authentication completes.
+message AuthResponse {
+  bool success = 1;
+  string message = 2;
+  bool otp_required = 3;
+  string temp_token = 4;
+  string auth_token = 5;
+}
+
+// Verify an OTP issued during signup/login. Caller must present the
+// `temp_token` returned by the previous AuthResponse (when otp_required).
+message VerifyOTPRequest {
+  string login = 1;      // username or email
+  string otp = 2;        // numeric OTP code
+  string temp_token = 3; // token returned by Signup/Login when otp_required=true
+}
+
+message VerifyOTPResponse {
+  bool success = 1;
+  string message = 2;
+  // When verification succeeds an auth_token may be returned so the client
+  // can use it for subsequent authenticated requests.
+  string auth_token = 3;
 }
