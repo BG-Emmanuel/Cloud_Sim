@@ -243,6 +243,10 @@ class ThreadedNodeServer:
                 elif command == "list_files":
                     # New command: List files stored on this node
                     return self._list_local_files()
+
+                elif command == "delete_file":
+                    # Delete a local file by name or file_id
+                    return self._delete_local_file(args)
                 
                 elif command == "set_online_status":
                     # Special command to change online/offline status
@@ -281,6 +285,10 @@ class ThreadedNodeServer:
                     
                     print(f"[Node {self.node.node_id}] Status changed: {old_status} -> {new_status}")
                     return {"success": True, "node_id": self.node.node_id, "status": new_status, "old_status": old_status}
+                
+                elif command == "download_file":
+                    # New command: Download a file from another node
+                    return self._download_file_from_network(args)
                 
                 else:
                     return {"error": f"Unknown command: {command}"}
@@ -379,6 +387,83 @@ class ThreadedNodeServer:
             
         except Exception as e:
             return {"error": f"Failed to create file: {str(e)}"}
+
+    def _delete_local_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete a file locally on this node. Accepts `file_name` or `file_id`."""
+        file_name = args.get('file_name')
+        file_id = args.get('file_id')
+
+        # Prefer file_name if provided
+        if not file_name and not file_id:
+            return {"error": "Missing file_name or file_id parameter"}
+
+        try:
+            # If file_name provided, delete that file in storage dir
+            if file_name:
+                target_path = os.path.join(self.storage_path, file_name)
+                if not os.path.exists(target_path):
+                    return {"error": f"File '{file_name}' not found"}
+
+                size = os.path.getsize(target_path)
+                os.remove(target_path)
+
+                # Remove stored_files entries that reference this file_name
+                to_remove = [fid for fid, t in list(self.node.stored_files.items()) if t.file_name == file_name]
+                for fid in to_remove:
+                    try:
+                        del self.node.stored_files[fid]
+                    except KeyError:
+                        pass
+
+                # Remove any chunk directories named after file_ids
+                for fid in to_remove:
+                    chunk_dir = os.path.join(self.storage_path, fid)
+                    if os.path.exists(chunk_dir):
+                        try:
+                            shutil.rmtree(chunk_dir)
+                        except Exception:
+                            pass
+
+                # Update used storage (don't go negative)
+                self.node.used_storage = max(0, self.node.used_storage - size)
+
+                self.node.total_requests_processed += 1
+                return {"success": True, "file_name": file_name, "deleted_bytes": size}
+
+            # If file_id provided, try to remove based on stored_files record
+            if file_id:
+                transfer = self.node.stored_files.get(file_id)
+                if not transfer:
+                    return {"error": f"File id '{file_id}' not found"}
+
+                # Remove actual file if exists
+                file_path = os.path.join(self.storage_path, transfer.file_name)
+                deleted_bytes = 0
+                if os.path.exists(file_path):
+                    deleted_bytes = os.path.getsize(file_path)
+                    os.remove(file_path)
+
+                # Remove chunk dir if present
+                chunk_dir = os.path.join(self.storage_path, file_id)
+                if os.path.exists(chunk_dir):
+                    try:
+                        shutil.rmtree(chunk_dir)
+                    except Exception:
+                        pass
+
+                # Remove stored_files record
+                try:
+                    del self.node.stored_files[file_id]
+                except KeyError:
+                    pass
+
+                # Update used storage
+                self.node.used_storage = max(0, self.node.used_storage - deleted_bytes)
+                self.node.total_requests_processed += 1
+                return {"success": True, "file_id": file_id, "deleted_bytes": deleted_bytes}
+
+        except Exception as e:
+            return {"error": f"Failed to delete file: {str(e)}"}
     
     def _list_local_files(self) -> Dict[str, Any]:
         """List all files stored locally on this node"""
@@ -409,6 +494,192 @@ class ThreadedNodeServer:
             }
         except Exception as e:
             return {"error": f"Failed to list files: {str(e)}"}
+    
+    def _download_file_from_network(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Download a file from another node in the network"""
+        source_node_id = args.get('source_node_id')
+        file_name = args.get('file_name')
+        bandwidth = args.get('bandwidth', 1000)
+        
+        if not source_node_id or not file_name:
+            return {"error": "Missing source_node_id or file_name"}
+        
+        # Check if we're registered with network
+        if not self.registered or not self.network_host or not self.network_port:
+            return {"error": "Node not registered with network"}
+        
+        try:
+            # Step 1: Connect to network coordinator to find source node
+            network_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            network_sock.settimeout(10)
+            network_sock.connect((self.network_host, self.network_port))
+            
+            # Get node list to find source node address
+            request = {
+                "command": "list_nodes",
+                "args": {}
+            }
+            
+            network_sock.sendall(json.dumps(request).encode('utf-8'))
+            data = network_sock.recv(4096)
+            nodes_response = json.loads(data.decode('utf-8'))
+            network_sock.close()
+            
+            if 'error' in nodes_response:
+                return {"error": f"Failed to get node list: {nodes_response['error']}"}
+            
+            nodes = nodes_response.get('nodes', {})
+            if source_node_id not in nodes:
+                return {"error": f"Source node {source_node_id} not found"}
+            
+            source_node_info = nodes[source_node_id]
+            if isinstance(source_node_info, dict):
+                source_address = source_node_info.get('address', '')
+                source_status = source_node_info.get('status', 'unknown')
+            else:
+                source_address = source_node_info
+                source_status = 'online'
+            
+            if source_status != 'online':
+                return {"error": f"Source node {source_node_id} is offline"}
+            
+            if ':' not in source_address:
+                return {"error": f"Invalid address for source node {source_node_id}"}
+            
+            source_host, source_port = source_address.split(':')
+            source_port = int(source_port)
+            
+            # Step 2: Connect to source node to get file info
+            source_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            source_sock.settimeout(10)
+            source_sock.connect((source_host, source_port))
+            
+            # First, list files on source node to find the file
+            list_request = {
+                "command": "list_files",
+                "args": {}
+            }
+            
+            source_sock.sendall(json.dumps(list_request).encode('utf-8'))
+            data = source_sock.recv(4096)
+            list_response = json.loads(data.decode('utf-8'))
+            
+            if not list_response.get('success'):
+                source_sock.close()
+                return {"error": f"Failed to list files on {source_node_id}: {list_response.get('error')}"}
+            
+            # Find the requested file
+            source_files = list_response.get('files', [])
+            file_info = None
+            for f in source_files:
+                if f['name'] == file_name:
+                    file_info = f
+                    break
+            
+            if not file_info:
+                source_sock.close()
+                return {"error": f"File '{file_name}' not found on {source_node_id}"}
+            
+            source_sock.close()
+            
+            file_size_bytes = file_info['size_bytes']
+            
+            # Step 3: Create connection through network coordinator
+            network_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            network_sock.settimeout(10)
+            network_sock.connect((self.network_host, self.network_port))
+            
+            conn_request = {
+                "command": "create_connection",
+                "args": {
+                    "node1_id": source_node_id,
+                    "node2_id": self.node.node_id,
+                    "bandwidth": bandwidth
+                }
+            }
+            
+            network_sock.sendall(json.dumps(conn_request).encode('utf-8'))
+            data = network_sock.recv(4096)
+            conn_response = json.loads(data.decode('utf-8'))
+            
+            if not conn_response.get('success'):
+                network_sock.close()
+                return {"error": f"Failed to create connection: {conn_response.get('error')}"}
+            
+            # Step 4: Initiate transfer through network coordinator
+            transfer_request = {
+                "command": "initiate_transfer",
+                "args": {
+                    "source_node_id": source_node_id,
+                    "target_node_id": self.node.node_id,
+                    "file_name": file_name,
+                    "file_size": file_size_bytes
+                }
+            }
+            
+            network_sock.sendall(json.dumps(transfer_request).encode('utf-8'))
+            data = network_sock.recv(4096)
+            transfer_response = json.loads(data.decode('utf-8'))
+            
+            if not transfer_response.get('success'):
+                network_sock.close()
+                return {"error": f"Failed to initiate transfer: {transfer_response.get('error')}"}
+            
+            file_id = transfer_response['file_id']
+            total_chunks = transfer_response['total_chunks']
+            
+            # Step 5: Process the transfer
+            print(f"[Node {self.node.node_id}] Downloading {file_name} from {source_node_id}...")
+            
+            chunks_processed = 0
+            chunks_per_step = 3
+            
+            while chunks_processed < total_chunks:
+                process_request = {
+                    "command": "process_transfer",
+                    "args": {
+                        "file_id": file_id,
+                        "chunks_to_process": chunks_per_step
+                    }
+                }
+                
+                network_sock.sendall(json.dumps(process_request).encode('utf-8'))
+                data = network_sock.recv(4096)
+                process_response = json.loads(data.decode('utf-8'))
+                
+                if not process_response.get('success'):
+                    network_sock.close()
+                    return {"error": f"Transfer failed: {process_response.get('error')}"}
+                
+                new_chunks = process_response.get('chunks_processed', 0)
+                chunks_processed += new_chunks
+                
+                progress = (chunks_processed / total_chunks) * 100
+                print(f"[Node {self.node.node_id}] Download progress: {progress:.1f}% ({chunks_processed}/{total_chunks} chunks)")
+                
+                if process_response.get('completed'):
+                    break
+            
+            network_sock.close()
+            
+            # Verify file was downloaded
+            downloaded_file_path = os.path.join(self.storage_path, file_name)
+            if os.path.exists(downloaded_file_path):
+                actual_size = os.path.getsize(downloaded_file_path)
+                return {
+                    "success": True,
+                    "file_name": file_name,
+                    "file_path": downloaded_file_path,
+                    "source_node": source_node_id,
+                    "file_size_bytes": actual_size,
+                    "file_size_mb": actual_size / (1024 * 1024),
+                    "message": f"File downloaded successfully from {source_node_id}"
+                }
+            else:
+                return {"error": "Download completed but file not found locally"}
+                
+        except Exception as e:
+            return {"error": f"Download failed: {str(e)}"}
     
     def register_with_network(self, network_host, network_port):
         """Register this node with the network coordinator"""
@@ -487,10 +758,12 @@ def interactive_mode(server: ThreadedNodeServer):
         print("  4. Show network statistics")
         print("  5. Show performance metrics")
         print("  6. Set online/offline status")
-        print("  7. Exit interactive mode")
+        print("  7. Download file from network")
+        print("  8. Delete a local file")
+        print("  9. Exit interactive mode")
         
         try:
-            choice = input("\nEnter your choice (1-7): ").strip()
+            choice = input("\nEnter your choice (1-8): ").strip()
             
             if choice == '1':
                 # Create file
@@ -623,11 +896,169 @@ def interactive_mode(server: ThreadedNodeServer):
                     print("Invalid choice!")
             
             elif choice == '7':
+                # Download file from network
+                if not server.registered:
+                    print("✗ Node is not registered with network. Cannot download files.")
+                    continue
+                
+                # Get available nodes from network
+                try:
+                    network_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    network_sock.settimeout(10)
+                    network_sock.connect((server.network_host, server.network_port))
+                    
+                    request = {
+                        "command": "list_nodes",
+                        "args": {}
+                    }
+                    
+                    network_sock.sendall(json.dumps(request).encode('utf-8'))
+                    data = network_sock.recv(4096)
+                    nodes_response = json.loads(data.decode('utf-8'))
+                    network_sock.close()
+                    
+                    if 'error' in nodes_response:
+                        print(f"✗ Failed to get node list: {nodes_response['error']}")
+                        continue
+                    
+                    nodes = nodes_response.get('nodes', {})
+                    online_nodes = {}
+                    
+                    for node_id, node_info in nodes.items():
+                        if isinstance(node_info, dict):
+                            status = node_info.get('status', 'unknown')
+                            address = node_info.get('address', '')
+                        else:
+                            status = 'online'
+                            address = node_info
+                        
+                        if status == 'online' and node_id != server.node.node_id:
+                            online_nodes[node_id] = address
+                    
+                    if not online_nodes:
+                        print("✗ No other online nodes available for download")
+                        continue
+                    
+                    print(f"\nAvailable source nodes:")
+                    node_list = list(online_nodes.keys())
+                    for i, node_id in enumerate(node_list, 1):
+                        print(f"  {i}. {node_id}")
+                    
+                    try:
+                        node_choice = int(input(f"\nSelect source node (1-{len(node_list)}): ")) - 1
+                        source_node_id = node_list[node_choice]
+                    except (ValueError, IndexError):
+                        print("Invalid selection!")
+                        continue
+                    
+                    # Connect to source node to list files
+                    source_address = online_nodes[source_node_id]
+                    if ':' not in source_address:
+                        print(f"Invalid address for node {source_node_id}")
+                        continue
+                    
+                    source_host, source_port = source_address.split(':')
+                    source_port = int(source_port)
+                    
+                    source_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    source_sock.settimeout(10)
+                    source_sock.connect((source_host, source_port))
+                    
+                    list_request = {
+                        "command": "list_files",
+                        "args": {}
+                    }
+                    
+                    source_sock.sendall(json.dumps(list_request).encode('utf-8'))
+                    data = source_sock.recv(4096)
+                    list_response = json.loads(data.decode('utf-8'))
+                    source_sock.close()
+                    
+                    if not list_response.get('success'):
+                        print(f"✗ Failed to list files on {source_node_id}: {list_response.get('error')}")
+                        continue
+                    
+                    source_files = list_response.get('files', [])
+                    if not source_files:
+                        print(f"✗ No files available on {source_node_id}")
+                        continue
+                    
+                    print(f"\nFiles available on {source_node_id}:")
+                    for i, file_info in enumerate(source_files, 1):
+                        print(f"  {i}. {file_info['name']} ({file_info['size_mb']:.2f} MB)")
+                    
+                    try:
+                        file_choice = int(input(f"\nSelect file to download (1-{len(source_files)}): ")) - 1
+                        selected_file = source_files[file_choice]
+                    except (ValueError, IndexError):
+                        print("Invalid selection!")
+                        continue
+                    
+                    try:
+                        bandwidth = int(input("\nEnter download bandwidth in Mbps (default: 1000): ") or "1000")
+                    except ValueError:
+                        bandwidth = 1000
+                    
+                    # Start download
+                    print(f"\nStarting download from {source_node_id}...")
+                    result = server._download_file_from_network({
+                        'source_node_id': source_node_id,
+                        'file_name': selected_file['name'],
+                        'bandwidth': bandwidth
+                    })
+                    
+                    if result.get('success'):
+                        print(f"✓ Download completed successfully!")
+                        print(f"  File: {result['file_name']}")
+                        print(f"  Size: {result['file_size_mb']:.2f} MB")
+                        print(f"  Path: {result['file_path']}")
+                        print(f"  Source: {result['source_node']}")
+                    else:
+                        print(f"✗ Download failed: {result.get('error', 'Unknown error')}")
+                        
+                except Exception as e:
+                    print(f"✗ Error during download setup: {e}")
+            
+            elif choice == '8':
+                # Delete a local file
+                list_result = server._list_local_files()
+                if not list_result.get('success'):
+                    print(f"✗ Failed to list files: {list_result.get('error')}")
+                    continue
+
+                files = list_result.get('files', [])
+                if not files:
+                    print("No files available to delete.")
+                    continue
+
+                print(f"\nFiles stored on node {server.node.node_id}:")
+                for i, f in enumerate(files, 1):
+                    print(f"  {i}. {f['name']} ({f['size_mb']:.2f} MB)")
+
+                try:
+                    del_choice = int(input(f"\nSelect file to delete (1-{len(files)}): ")) - 1
+                    target = files[del_choice]
+                except (ValueError, IndexError):
+                    print("Invalid selection!")
+                    continue
+
+                confirm = input(f"Are you sure you want to delete '{target['name']}'? (y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("Deletion cancelled.")
+                    continue
+
+                result = server._delete_local_file({'file_name': target['name']})
+                if result.get('success'):
+                    print(f"✓ Deleted '{target['name']}' ({result.get('deleted_bytes', 0)} bytes)")
+                else:
+                    print(f"✗ Failed to delete file: {result.get('error', 'Unknown error')}")
+
+            elif choice == '9':
                 print("Exiting interactive mode...")
                 break
             
             else:
-                print("Invalid choice! Please enter 1-7.")
+                print("Invalid choice! Please enter 1-8.")
                 
         except KeyboardInterrupt:
             print("\nExiting interactive mode...")

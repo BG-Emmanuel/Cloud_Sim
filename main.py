@@ -145,6 +145,10 @@ class NodeClient:
             'file_size_mb': file_size_mb,
             'content_type': content_type
         })
+
+    def delete_file(self, file_name: str):
+        """Delete a file on this node by name"""
+        return self._send_request("delete_file", {"file_name": file_name})
     
     def set_online_status(self, online: bool):
         """Set node online/offline status"""
@@ -230,7 +234,8 @@ def interactive_mode(network_client, network_host, network_port):
         print("  3. Create file on a node")
         print("  4. Show network statistics")
         print("  5. Manage node online/offline status")
-        print("  6. Exit")
+        print("  6. Delete file on a node")
+        print("  7. Exit")
         
         try:
             choice = input("\nEnter your choice (1-6): ").strip()
@@ -249,8 +254,74 @@ def interactive_mode(network_client, network_host, network_port):
             
             elif choice == '5':
                 manage_node_status(network_client, network_host, network_port)
-            
             elif choice == '6':
+                # Delete a file on a reachable node
+                nodes_list = network_client.list_nodes()
+                if 'error' in nodes_list:
+                    print(f"✗ Failed to get nodes: {nodes_list['error']}")
+                    continue
+
+                registered_nodes = nodes_list.get('nodes', {})
+                reachable_nodes = {}
+                for node_id, node_data in registered_nodes.items():
+                    if isinstance(node_data, dict) and node_data.get('status') == 'online' and ':' in node_data.get('address', ''):
+                        host, port = node_data['address'].split(':')
+                        client = NodeClient(host, int(port))
+                        if not _check_simulated_offline(client):
+                            reachable_nodes[node_id] = (host, int(port))
+
+                if not reachable_nodes:
+                    print("No reachable nodes available")
+                    continue
+
+                print("\nAvailable nodes:")
+                node_list = list(reachable_nodes.keys())
+                for i, nid in enumerate(node_list, 1):
+                    print(f"  {i}. {nid}")
+
+                try:
+                    choice_idx = int(input(f"\nSelect node (1-{len(node_list)}): ")) - 1
+                    selected_node = node_list[choice_idx]
+                except (ValueError, IndexError):
+                    print("Invalid selection!")
+                    continue
+
+                host, port = reachable_nodes[selected_node]
+                node_client = NodeClient(host, port)
+
+                files_result = node_client.list_files()
+                if not files_result.get('success'):
+                    print(f"✗ Failed to list files: {files_result.get('error')}")
+                    continue
+
+                files = files_result.get('files', [])
+                if not files:
+                    print("No files available on selected node")
+                    continue
+
+                print(f"\nFiles on {selected_node}:")
+                for i, f in enumerate(files, 1):
+                    print(f"  {i}. {f['name']} ({f['size_mb']:.2f} MB)")
+
+                try:
+                    file_choice = int(input(f"\nSelect file to delete (1-{len(files)}): ")) - 1
+                    target = files[file_choice]
+                except (ValueError, IndexError):
+                    print("Invalid selection!")
+                    continue
+
+                confirm = input(f"Are you sure you want to delete '{target['name']}' on {selected_node}? (y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("Deletion cancelled.")
+                    continue
+
+                del_res = node_client.delete_file(target['name'])
+                if del_res.get('success'):
+                    print(f"✓ Deleted '{target['name']}' from {selected_node}")
+                else:
+                    print(f"✗ Failed to delete file: {del_res.get('error', 'Unknown error')}")
+
+            elif choice == '7':
                 print("Exiting interactive mode...")
                 break
             
