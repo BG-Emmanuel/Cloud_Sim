@@ -375,6 +375,44 @@ class ThreadedNodeServer:
             
             actual_size = os.path.getsize(file_path)
             
+            # Notify network coordinator of updated metadata (best-effort)
+            try:
+                if self.registered and self.network_host and self.network_port:
+                    # compute current usage and files count
+                    total_bytes = self.node.total_storage
+                    # recalc actual disk usage
+                    total_size = 0
+                    for dirpath, dirnames, filenames in os.walk(self.storage_path):
+                        for filename in filenames:
+                            filepath = os.path.join(dirpath, filename)
+                            if os.path.exists(filepath):
+                                total_size += os.path.getsize(filepath)
+
+                    files_count = len([f for f in os.listdir(self.storage_path) if os.path.isfile(os.path.join(self.storage_path, f))])
+
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((self.network_host, self.network_port))
+                    request = {
+                        "command": "node_update",
+                        "args": {
+                            "node_id": self.node.node_id,
+                            "address": f"{self.host}:{self.actual_port}",
+                            "used_bytes": total_size,
+                            "total_bytes": total_bytes,
+                            "files_count": files_count,
+                            "timestamp": time.time()
+                        }
+                    }
+                    sock.sendall(json.dumps(request).encode('utf-8'))
+                    try:
+                        _ = sock.recv(4096)
+                    except Exception:
+                        pass
+                    sock.close()
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "file_name": file_name,
@@ -428,6 +466,43 @@ class ThreadedNodeServer:
                 self.node.used_storage = max(0, self.node.used_storage - size)
 
                 self.node.total_requests_processed += 1
+                # Notify network coordinator about update
+                try:
+                    if self.registered and self.network_host and self.network_port:
+                        total_bytes = self.node.total_storage
+                        # recalc actual disk usage
+                        total_size = 0
+                        for dirpath, dirnames, filenames in os.walk(self.storage_path):
+                            for filename in filenames:
+                                filepath = os.path.join(dirpath, filename)
+                                if os.path.exists(filepath):
+                                    total_size += os.path.getsize(filepath)
+
+                        files_count = len([f for f in os.listdir(self.storage_path) if os.path.isfile(os.path.join(self.storage_path, f))])
+
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(5)
+                        sock.connect((self.network_host, self.network_port))
+                        request = {
+                            "command": "node_update",
+                            "args": {
+                                "node_id": self.node.node_id,
+                                "address": f"{self.host}:{self.actual_port}",
+                                "used_bytes": total_size,
+                                "total_bytes": total_bytes,
+                                "files_count": files_count,
+                                "timestamp": time.time()
+                            }
+                        }
+                        sock.sendall(json.dumps(request).encode('utf-8'))
+                        try:
+                            _ = sock.recv(4096)
+                        except Exception:
+                            pass
+                        sock.close()
+                except Exception:
+                    pass
+
                 return {"success": True, "file_name": file_name, "deleted_bytes": size}
 
             # If file_id provided, try to remove based on stored_files record
@@ -460,6 +535,43 @@ class ThreadedNodeServer:
                 # Update used storage
                 self.node.used_storage = max(0, self.node.used_storage - deleted_bytes)
                 self.node.total_requests_processed += 1
+                # Notify network coordinator about update
+                try:
+                    if self.registered and self.network_host and self.network_port:
+                        total_bytes = self.node.total_storage
+                        # recalc actual disk usage
+                        total_size = 0
+                        for dirpath, dirnames, filenames in os.walk(self.storage_path):
+                            for filename in filenames:
+                                filepath = os.path.join(dirpath, filename)
+                                if os.path.exists(filepath):
+                                    total_size += os.path.getsize(filepath)
+
+                        files_count = len([f for f in os.listdir(self.storage_path) if os.path.isfile(os.path.join(self.storage_path, f))])
+
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(5)
+                        sock.connect((self.network_host, self.network_port))
+                        request = {
+                            "command": "node_update",
+                            "args": {
+                                "node_id": self.node.node_id,
+                                "address": f"{self.host}:{self.actual_port}",
+                                "used_bytes": total_size,
+                                "total_bytes": total_bytes,
+                                "files_count": files_count,
+                                "timestamp": time.time()
+                            }
+                        }
+                        sock.sendall(json.dumps(request).encode('utf-8'))
+                        try:
+                            _ = sock.recv(4096)
+                        except Exception:
+                            pass
+                        sock.close()
+                except Exception:
+                    pass
+
                 return {"success": True, "file_id": file_id, "deleted_bytes": deleted_bytes}
 
         except Exception as e:
@@ -708,6 +820,41 @@ class ThreadedNodeServer:
             if response.get('success'):
                 self.registered = True
                 print(f"[Node {self.node.node_id}] Successfully registered with network at {network_host}:{network_port}")
+                # Send initial metadata update after registering
+                try:
+                    # compute current usage and files count
+                    total_bytes = self.node.total_storage
+                    total_size = 0
+                    for dirpath, dirnames, filenames in os.walk(self.storage_path):
+                        for filename in filenames:
+                            filepath = os.path.join(dirpath, filename)
+                            if os.path.exists(filepath):
+                                total_size += os.path.getsize(filepath)
+
+                    files_count = len([f for f in os.listdir(self.storage_path) if os.path.isfile(os.path.join(self.storage_path, f))])
+
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((self.network_host, self.network_port))
+                    request = {
+                        "command": "node_update",
+                        "args": {
+                            "node_id": self.node.node_id,
+                            "address": f"{self.host}:{self.actual_port}",
+                            "used_bytes": total_size,
+                            "total_bytes": total_bytes,
+                            "files_count": files_count,
+                            "timestamp": time.time()
+                        }
+                    }
+                    sock.sendall(json.dumps(request).encode('utf-8'))
+                    try:
+                        _ = sock.recv(4096)
+                    except Exception:
+                        pass
+                    sock.close()
+                except Exception:
+                    pass
                 return True
             else:
                 print(f"[Node {self.node.node_id}] Failed to register: {response}")

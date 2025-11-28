@@ -22,6 +22,7 @@ class ThreadedNetworkServer:
         self.port = port
         self.nodes: Dict[str, str] = {}  # node_id -> "host:port"
         self.node_status: Dict[str, str] = {}  # node_id -> "online"/"offline"
+        self.node_meta: Dict[str, Dict[str, Any]] = {}  # optional metadata reported by nodes
         self.connections: Dict[str, Dict[str, int]] = defaultdict(dict)
         self.active_transfers: Dict[str, dict] = {}
         self.running = False
@@ -36,7 +37,9 @@ class ThreadedNetworkServer:
         self.server_socket.listen(5)
         self.running = True
         
-        print(f"[Network] Coordinator started on {self.host}:{self.port}")
+        print("=" * 72)
+        print(f" Network Coordinator listening on {self.host}:{self.port} ".center(72, " "))
+        print("=" * 72)
         print(f"[Network] Node status is MANUAL - use set_node_status command to change online/offline states")
         
         # Start accepting connections in a separate thread
@@ -112,7 +115,11 @@ class ThreadedNetworkServer:
                     self.nodes[node_id] = node_address
                     self.node_status[node_id] = "online"
                 
-                print(f"● [Network] Registered {node_id} at {node_address} [ONLINE]")
+                print("-" * 72)
+                print(f"● Registered node: {node_id}")
+                print(f"  Address : {node_address}")
+                print(f"  Status  : ONLINE")
+                print("-" * 72)
                 return {"success": True, "registered": node_id, "status": "online"}
             
             elif command == "unregister_node":
@@ -131,10 +138,28 @@ class ThreadedNetworkServer:
                 with self.lock:
                     nodes_with_status = {}
                     for node_id, address in self.nodes.items():
-                        nodes_with_status[node_id] = {
+                        entry = {
                             "address": address,
                             "status": self.node_status.get(node_id, "unknown")
                         }
+                        # include metadata reported by node (used storage, file counts, etc.)
+                        if node_id in self.node_meta:
+                            meta = dict(self.node_meta[node_id])
+                            # add human readable fields
+                            if 'used_bytes' in meta:
+                                meta['used_bytes_human'] = self._human_readable_bytes(meta['used_bytes'])
+                            if 'total_bytes' in meta:
+                                meta['total_bytes_human'] = self._human_readable_bytes(meta['total_bytes'])
+                            if 'timestamp' in meta:
+                                try:
+                                    meta['last_update'] = self._format_timestamp(meta['timestamp'])
+                                except Exception:
+                                    meta['last_update'] = meta.get('timestamp')
+
+                            entry.update(meta)
+
+                        nodes_with_status[node_id] = entry
+
                 return {"nodes": nodes_with_status}
             
             elif command == "set_node_status":
@@ -425,6 +450,50 @@ class ThreadedNetworkServer:
                         "completed_transfers": len([t for t in self.active_transfers.values() if t['status'] == 'completed']),
                         "failed_transfers": len([t for t in self.active_transfers.values() if t['status'] == 'failed'])
                     }
+
+            elif command == "node_update":
+                # Nodes can proactively send metadata updates (used storage, file counts, etc.)
+                node_id = args.get('node_id')
+                if not node_id:
+                    return {"error": "Missing node_id"}
+
+                # Allowed metadata keys: address, used_bytes, total_bytes, files_count, timestamp
+                meta = {}
+                for k in ['address', 'used_bytes', 'total_bytes', 'files_count', 'timestamp']:
+                    if k in args:
+                        meta[k] = args[k]
+
+                with self.lock:
+                    if node_id in self.nodes:
+                        # Optionally update address if provided
+                        if 'address' in meta and meta['address']:
+                            self.nodes[node_id] = meta['address']
+                        # Store metadata
+                        self.node_meta[node_id] = meta
+
+                        # Presentable log
+                        used = meta.get('used_bytes')
+                        total = meta.get('total_bytes')
+                        files = meta.get('files_count')
+                        ts = meta.get('timestamp')
+
+                        print("-" * 72)
+                        print(f"[Network] Update from {node_id}")
+                        print(f"  Address : {self.nodes.get(node_id)}")
+                        if used is not None and total is not None:
+                            print(f"  Storage : {self._human_readable_bytes(used)} / {self._human_readable_bytes(total)}")
+                        if files is not None:
+                            print(f"  Files   : {files}")
+                        if ts is not None:
+                            try:
+                                print(f"  Updated : {self._format_timestamp(ts)}")
+                            except Exception:
+                                print(f"  Updated : {ts}")
+                        print("-" * 72)
+
+                        return {"success": True}
+                    else:
+                        return {"error": "Node not registered"}
             
             elif command == "tick":
                 with self.lock:
@@ -478,6 +547,26 @@ class ThreadedNetworkServer:
             
         except Exception as e:
             return {"error": f"Failed to communicate with node: {str(e)}"}
+
+    # ---- Presentation helpers ----
+    def _human_readable_bytes(self, n: int) -> str:
+        try:
+            n = float(n)
+        except Exception:
+            return str(n)
+
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while n >= 1024 and idx < len(units) - 1:
+            n /= 1024.0
+            idx += 1
+        return f"{n:.2f} {units[idx]}"
+
+    def _format_timestamp(self, ts: float) -> str:
+        try:
+            return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(ts)))
+        except Exception:
+            return str(ts)
     
     def _cancel_transfers_for_node(self, node_id: str):
         """Cancel all active transfers involving the specified node"""
