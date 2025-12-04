@@ -58,13 +58,29 @@ def run(command, *args):
                 if hasattr(resp, attr):
                     print(f'  {attr}:', getattr(resp, attr))
 
+        elif command == 'verify':
+            # Expect: verify <email> <otp>
+            if len(args) < 2:
+                print('Usage: verify <email> <otp>')
+                return
+            email, otp = args[0], args[1]
+            req = build_message(cloudsecurity_pb2.OtpRequest, {
+                'email': email,
+                'otp': otp,
+            })
+            resp = stub.VerifyOTP(req)
+            print('Verify OTP response:')
+            for attr in ('success', 'message', 'auth_token'):
+                if hasattr(resp, attr):
+                    print(f'  {attr}:', getattr(resp, attr))
+
         else:
-            print('Invalid command. Use "signup" or "login"')
+            print('Invalid command. Use "signup", "login", or "verify"')
 
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print('Usage: client.py <signup|login> [args...]')
+        print('Usage: client.py <signup|login|verify> [args...]')
         sys.exit(1)
     cmd = sys.argv[1]
     run(cmd, *sys.argv[2:])
