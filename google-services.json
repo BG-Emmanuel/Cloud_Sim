@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "836063684390",
+    "project_id": "cloudsec-614ac",
+    "storage_bucket": "cloudsec-614ac.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:836063684390:android:aeb082ebcd556a171d03e7",
+        "android_client_info": {
+          "package_name": "com.emmanuel.cloud"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAuy24Q2zlMXrKI93V9NCNi9Iw-XZjOSuA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
