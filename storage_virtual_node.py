@@ -144,7 +144,7 @@ class StorageVirtualNode:
         # Calculate transfer time (in seconds)
         transfer_time = chunk_size_bits / available_bandwidth
         time.sleep(transfer_time)  # Simulate transfer delay
-        
+
         # Update chunk status
         chunk.status = TransferStatus.COMPLETED
         chunk.stored_node = self.node_id
@@ -152,12 +152,13 @@ class StorageVirtualNode:
         # Update metrics
         self.network_utilization += available_bandwidth * 0.8  # Simulate some fluctuation
         self.total_data_transferred += chunk.size
+        self.used_storage += chunk.size
         
         # Check if all chunks are completed
         if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
             transfer.status = TransferStatus.COMPLETED
             transfer.completed_at = time.time()
-            self.used_storage += transfer.total_size
+            # self.used_storage += transfer.total_size
             self.stored_files[file_id] = transfer
             del self.active_transfers[file_id]
             self.total_requests_processed += 1
@@ -222,3 +223,5 @@ class StorageVirtualNode:
             "failed_transfers": self.failed_transfers,
             "current_active_transfers": len(self.active_transfers)
         }
+
+
