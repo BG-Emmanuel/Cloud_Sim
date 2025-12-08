@@ -1,0 +1,33 @@
+// generate the skeleton and stub classes
+// generate calculator_pb2.py and calculator_pb2_grpc.py.
+// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. cloudsecurity.proto
+
+syntax = "proto3";
+
+package cloud;
+
+service UserService {
+  rpc signup (SignupRequest) returns (Response);
+  rpc login (LoginRequest) returns (Response);
+  rpc verifyOtp (OtpRequest) returns (Response);
+}
+
+message SignupRequest {
+  string login = 1;
+  string password = 2;
+  string email = 3;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message OtpRequest {
+  string email = 1;
+  string otp = 2;
+}
+
+message Response {
+  string result = 1;
+}
