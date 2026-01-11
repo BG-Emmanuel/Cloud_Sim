@@ -58,6 +58,31 @@ def run(command, *args):
                 if hasattr(resp, attr):
                     print(f'  {attr}:', getattr(resp, attr))
 
+            # If server requires OTP, prompt the user and call VerifyOTP
+            if getattr(resp, 'otp_required', False):
+                otp = input('Enter the OTP sent to your email: ').strip()
+                # Build VerifyOTPRequest (message name may vary between proto versions)
+                verify_cls = None
+                for name in ('VerifyOTPRequest', 'OtpRequest'):
+                    verify_cls = getattr(cloudsecurity_pb2, name, None)
+                    if verify_cls is not None:
+                        break
+                if verify_cls is None:
+                    print('No VerifyOTP request class found in protobuf definitions')
+                    return
+
+                verify_req = build_message(verify_cls, {
+                    'email': login_val,
+                    'login': login_val,
+                    'otp': otp,
+                    'temp_token': getattr(resp, 'temp_token', ''),
+                })
+                verify_resp = stub.VerifyOTP(verify_req)
+                print('Verify OTP response:')
+                for attr in ('success', 'message', 'auth_token'):
+                    if hasattr(verify_resp, attr):
+                        print(f'  {attr}:', getattr(verify_resp, attr))
+
         elif command == 'verify':
             # Expect: verify <email> <otp>
             if len(args) < 2:

@@ -180,7 +180,8 @@ class UserServiceSkeleton(cloudsecurity_pb2_grpc.UserServiceServicer):
     def VerifyOTP(self, request, context) -> cloudsecurity_pb2.VerifyOTPResponse:
         """Verify the OTP and complete signup/login."""
         try:
-            email = self._get_field(request, 'email')
+            # accept both `email` and `login` fields (proto variations)
+            email = self._get_field(request, 'email', 'login')
             otp = self._get_field(request, 'otp')
             
             print(f'VerifyOTP request received for email: {email}')
